@@ -68,7 +68,7 @@ jobs:
 
           # Normalize/extract candidate items from common keys and pick top N
           jq -r --argjson n "$MAX_RESULTS" '
-            ($d := (.searchResults // .results // .items // [])) |
+            (.searchResults // .results // .items // []) as $d |
             ($d | if type=="array" then . else [.] end) |
             map({
               title: (.title // .heading // .headline // .name // ""),
@@ -83,7 +83,7 @@ jobs:
           # Truncate the AI input to avoid exceeding output-size limits
           head -c 60000 linkup_for_ai.txt > linkup_for_ai_trunc.txt || true
 
-          echo "short_results<<'EOF'" >> $GITHUB_OUTPUT
+          echo "short_results<<EOF" >> $GITHUB_OUTPUT
           cat linkup_for_ai_trunc.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
@@ -118,7 +118,7 @@ jobs:
         id: save_summary
         run: |
           printf '%s' "${{ steps.ai_summarize.outputs.response }}" > linkup_summary.txt
-          echo "summary<<'EOF'" >> $GITHUB_OUTPUT
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
           cat linkup_summary.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
