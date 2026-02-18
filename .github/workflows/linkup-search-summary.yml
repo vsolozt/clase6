@@ -1,0 +1,132 @@
+name: LinkUp search + summarize (gpt-4.1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: 'Query / topic to search with LinkUp'
+        required: true
+        default: "What is Microsoft's revenue and operating income for 2024?"
+      depth:
+        description: 'LinkUp search depth (e.g. standard, deep)'
+        required: false
+        default: 'standard'
+      max_results:
+        description: 'Number of top results to include for summarization'
+        required: false
+        default: '5'
+
+permissions:
+  contents: read
+  models: read
+
+jobs:
+  search_and_summarize:
+    name: Search LinkUp and summarize with AI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate inputs
+        run: |
+          echo "Query: ${{ github.event.inputs.topic }}"
+          echo "Depth: ${{ github.event.inputs.depth }}"
+          echo "Max results: ${{ github.event.inputs.max_results }}"
+
+      - name: Call LinkUp API
+        id: linkup_fetch
+        env:
+          LINKUP_API_KEY: ${{ secrets.LINKUP_API_KEY }}
+          QUERY: ${{ github.event.inputs.topic }}
+          DEPTH: ${{ github.event.inputs.depth }}
+          MAX_RESULTS: ${{ github.event.inputs.max_results }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LINKUP_API_KEY:-}" ]; then
+            echo "ERROR: repository secret LINKUP_API_KEY is not set"
+            exit 1
+          fi
+
+          payload=$(jq -nc --arg q "$QUERY" --arg depth "$DEPTH" '{q: $q, depth: $depth, outputType: "searchResults", includeImages: "false"}')
+
+          echo "Calling LinkUp API..."
+          response_with_code=$(curl -sS -w "\n%{http_code}" -X POST "https://api.linkup.so/v1/search" \
+            -H "Authorization: Bearer $LINKUP_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$payload")
+
+          http_code=$(echo "$response_with_code" | tail -n1)
+          body=$(echo "$response_with_code" | sed '$d')
+
+          echo "HTTP status: $http_code"
+          echo "$body" > linkup_raw.json
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "LinkUp API returned error (status $http_code)";
+            echo "$body" | jq . || true
+            exit 1
+          fi
+
+          # Normalize/extract candidate items from common keys and pick top N
+          jq -r --argjson n "$MAX_RESULTS" '
+            ($d := (.searchResults // .results // .items // [])) |
+            ($d | if type=="array" then . else [.] end) |
+            map({
+              title: (.title // .heading // .headline // .name // ""),
+              url: (.url // .sourceURL // .link // .html_url // ""),
+              source: (.source // .sourceTitle // .provider // ""),
+              snippet: (.snippet // .summary // .excerpt // .text // "")
+            })[:$n]' linkup_raw.json > linkup_top.json || echo '[]' > linkup_top.json
+
+          # Create a compact plain-text block to send to the AI step
+          jq -r '.[] | "- Title: \(.title)\n  Source: \(.source)\n  URL: \(.url)\n  Snippet: \(.snippet)\n"' linkup_top.json > linkup_for_ai.txt || true
+
+          # Truncate the AI input to avoid exceeding output-size limits
+          head -c 60000 linkup_for_ai.txt > linkup_for_ai_trunc.txt || true
+
+          echo "short_results<<'EOF'" >> $GITHUB_OUTPUT
+          cat linkup_for_ai_trunc.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload raw LinkUp JSON (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkup-raw-json
+          path: linkup_raw.json
+
+      - name: Summarize results with AI (gpt-4.1)
+        id: ai_summarize
+        uses: actions/ai-inference@a380166897b5408b8fb7dddd148142794cb5624a # v2.0.6
+        with:
+          model: openai/gpt-4.1
+          system-prompt: |
+            You are an expert research summarizer. Given a set of search results, produce:
+            - A concise 2–4 sentence summary (what matters most).
+            - 5 bullet-point key findings (each with a clear source URL).
+            - 3 short suggested next steps or verification queries.
+
+            IMPORTANT: Do not hallucinate. Base findings ONLY on the provided snippets and flag any conflicts.
+          prompt: |
+            Query: ${{ github.event.inputs.topic }}
+
+            Search results (top ${{ github.event.inputs.max_results }}):
+            ${{ steps.linkup_fetch.outputs.short_results }}
+
+            Deliver the output as a readable summary with bullets and source links.
+          max-tokens: 512
+
+      - name: Save AI summary + set step output
+        id: save_summary
+        run: |
+          printf '%s' "${{ steps.ai_summarize.outputs.response }}" > linkup_summary.txt
+          echo "summary<<'EOF'" >> $GITHUB_OUTPUT
+          cat linkup_summary.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload AI summary (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkup-summary
+          path: linkup_summary.txt
+
+    outputs:
+      ai_summary: ${{ steps.save_summary.outputs.summary }}
