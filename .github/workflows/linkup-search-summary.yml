@@ -118,9 +118,18 @@ jobs:
         id: save_summary
         run: |
           printf '%s' "${{ steps.ai_summarize.outputs.response }}" > linkup_summary.txt
-          echo "summary<<EOF" >> $GITHUB_OUTPUT
-          cat linkup_summary.txt >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+
+          # create a stable single-line base64 output (avoids heredoc delimiter issues)
+          if command -v base64 >/dev/null 2>&1; then
+            summary_b64=$(base64 -w0 linkup_summary.txt 2>/dev/null || base64 linkup_summary.txt)
+          else
+            summary_b64=$(python -c "import sys,base64;print(base64.b64encode(sys.stdin.read().encode()).decode())" < linkup_summary.txt)
+          fi
+          echo "summary_b64=$summary_b64" >> $GITHUB_OUTPUT
+
+          # also provide a safe single-line preview (trim and collapse newlines)
+          preview=$(head -c 1200 linkup_summary.txt | tr '\n' ' ' | sed -E 's/\s+/ /g' | sed -E 's/\"/\\\"/g')
+          echo "summary_preview=${preview}" >> $GITHUB_OUTPUT
 
       - name: Upload AI summary (artifact)
         uses: actions/upload-artifact@v4
@@ -129,4 +138,5 @@ jobs:
           path: linkup_summary.txt
 
     outputs:
-      ai_summary: ${{ steps.save_summary.outputs.summary }}
+      ai_summary: ${{ steps.save_summary.outputs.summary_preview }}
+      ai_summary_b64: ${{ steps.save_summary.outputs.summary_b64 }}
